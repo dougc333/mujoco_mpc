@@ -15,12 +15,21 @@
 #include "mjpc/tasks/quadruped/quadruped.h"
 
 #include <string>
-
+#include <cmath>
 #include <mujoco/mujoco.h>
 #include "mjpc/task.h"
 #include "mjpc/utilities.h"
 
+// namespace
+
 namespace mjpc {
+void YawToQuat(double yaw, double quat[4]) {
+  quat[0] = std::cos(yaw * 0.5);
+  quat[1] = 0.0;
+  quat[2] = 0.0;
+  quat[3] = std::sin(yaw * 0.5);
+}
+
 std::string QuadrupedHill::XmlPath() const {
   return GetModelPath("quadruped/task_hill.xml");
 }
@@ -304,48 +313,34 @@ void QuadrupedFlat::TransitionLocked(mjModel* model, mjData* data) {
 
   // ---------- Walk ----------
   double* goal_pos = data->mocap_pos + 3*residual_.goal_mocap_id_;
+    // ---------- Walk ----------
+  double* goal_pos = data->mocap_pos + 3*residual_.goal_mocap_id_;
   if (mode == ResidualFn::kModeWalk) {
-    double angvel = parameters[ParameterIndex(model, "Walk turn")];
-    double speed = parameters[ParameterIndex(model, "Walk speed")];
+    // Circular goal motion for the green mocap ball.
+    // The planner will try to follow this moving target.
 
-    // current torso direction
-    double* torso_xmat = data->xmat + 9*residual_.torso_body_id_;
-    double forward[2] = {torso_xmat[0], torso_xmat[3]};
-    mju_normalize(forward, 2);
-    double leftward[2] = {-forward[1], forward[0]};
+    constexpr double kCircleCenterX = 0.0;
+    constexpr double kCircleCenterY = 0.0;
+    constexpr double kCircleCenterZ = 0.26;
+    constexpr double kCircleRadius = 1.0;
+    constexpr double kCircleOmega = 0.8;   // rad/s
 
-    // switching into Walk or parameters changed, reset task state
-    if (mode != residual_.current_mode_ || residual_.angvel_ != angvel ||
-        residual_.speed_ != speed) {
-      // save time
-      residual_.mode_start_time_ = data->time;
+    double time = data->time;
+    double theta = kCircleOmega * time;
 
-      // save current speed and angvel
-      residual_.speed_ = speed;
-      residual_.angvel_ = angvel;
+    // clockwise circle in the XY plane
+    goal_pos[0] = kCircleCenterX + kCircleRadius * std::cos(theta);
+    goal_pos[1] = kCircleCenterY - kCircleRadius * std::sin(theta);
+    goal_pos[2] = kCircleCenterZ;
 
-      // compute and save rotation axis / walk origin
-      double axis[2] = {data->xpos[3*residual_.torso_body_id_],
-                        data->xpos[3*residual_.torso_body_id_+1]};
-      if (mju_abs(angvel) > ResidualFn::kMinAngvel) {
-        // don't allow turning with very small angvel
-        double d = speed / angvel;
-        axis[0] += d * leftward[0];
-        axis[1] += d * leftward[1];
-      }
-      residual_.position_[0] = axis[0];
-      residual_.position_[1] = axis[1];
+    // rotate the mocap body so the red dot points along the tangent direction
+    double dx = -kCircleRadius * kCircleOmega * std::sin(theta);
+    double dy = -kCircleRadius * kCircleOmega * std::cos(theta);
+    double yaw = std::atan2(dy, dx);
 
-      // save vector from axis to initial goal position
-      residual_.heading_[0] = goal_pos[0] - axis[0];
-      residual_.heading_[1] = goal_pos[1] - axis[1];
-    }
-
-    // move goal
-    double time = data->time - residual_.mode_start_time_;
-    residual_.Walk(goal_pos, time);
+    double* goal_quat = data->mocap_quat + 4 * residual_.goal_mocap_id_;
+    YawToQuat(yaw, goal_quat);
   }
-
 
   // ---------- Flip ----------
   double* compos = SensorByName(model, data, "torso_subtreecom");
